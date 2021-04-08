@@ -253,3 +253,38 @@ func TestIssue24(t *testing.T) {
 	err := vd.Validate(data, true)
 	assert.EqualError(t, err, "invalid parameter: SubmitDoctorImport[0].Idcard\tinvalid parameter: SubmitDoctorImport[0].PracCertNo\temail format is incorrect\tthe phone number supplied is not a number")
 }
+
+func TestTimeValidation_SingleParamNoError(t *testing.T) {
+	type T struct {
+		date string `vd:"time($)"`
+	}
+	assert.NoError(t, vd.Validate(T{date: "2020-05-14T00:00:00Z"}, true))
+}
+
+func TestTimeValidation_SingleParamError(t *testing.T) {
+	type T struct {
+		date string `vd:"time($)"`
+	}
+	assert.EqualError(t, vd.Validate(T{date: "Thu May 14 00:00:00 2020"}, true), "time format is not RFC3339")
+}
+
+func TestTimeValidation_LayoutParam(t *testing.T) {
+	type T struct {
+		date string `vd:"time($,'RFC3339')"`
+	}
+	assert.NoError(t, vd.Validate(T{date: "2020-05-14T00:00:00Z"}, true))
+}
+
+func TestTimeValidation_LayoutError(t *testing.T) {
+	type T struct {
+		date string `vd:"time($,'RFC3339')"`
+	}
+	assert.EqualError(t, vd.Validate(T{date: "Thu May 14 00:00:00 2020"}, true), "time format is not RFC3339")
+}
+
+func TestTimeValidation_LayoutANSIC(t *testing.T) {
+	type T struct {
+		date string `vd:"time($,'ANSIC')"`
+	}
+	assert.NoError(t, vd.Validate(T{date: "Thu May 14 00:00:00 2020"}, true))
+}

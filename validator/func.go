@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/nyaruka/phonenumbers"
 
@@ -117,6 +118,65 @@ func init() {
 				}
 			}
 			return fmt.Errorf("%+v range exceeded", set)
+		}
+	}, true)
+}
+
+func init() {
+	timeLayoutMap := map[string]string{
+		"ANSIC":       time.ANSIC,
+		"UnixDate":    time.UnixDate,
+		"RubyDate":    time.RubyDate,
+		"RFC822":      time.RFC822,
+		"RFC822Z":     time.RFC822Z,
+		"RFC850":      time.RFC850,
+		"RFC1123":     time.RFC1123,
+		"RFC1123Z":    time.RFC1123Z,
+		"RFC3339":     time.RFC3339,
+		"RFC3339Nano": time.RFC3339Nano,
+		"Kitchen":     time.Kitchen,
+		"Stamp":       time.Stamp,
+		"StampMilli":  time.StampMilli,
+		"StampMicro":  time.StampMicro,
+		"StampNano":   time.StampNano,
+	}
+
+	MustRegFunc("time", func(args ...interface{}) error {
+		switch len(args) {
+		case 1:
+			value, ok := args[0].(string)
+			if !ok {
+				return errors.New("the 1st parameter of time function is not string type")
+			}
+
+			_, err := time.Parse(time.RFC3339, value)
+			if err != nil {
+				return errors.New("time format is not RFC3339")
+			}
+			return nil
+		case 2:
+			value, ok := args[0].(string)
+			if !ok {
+				return errors.New("the 1st parameter of time function is not string type")
+			}
+
+			identifier, ok := args[1].(string)
+			if !ok {
+				return errors.New("the 2nd parameter of time function is not string type")
+			}
+
+			layout, ok := timeLayoutMap[identifier]
+			if !ok {
+				return fmt.Errorf("%s is not a supported layout", identifier)
+			}
+
+			_, err := time.Parse(layout, value)
+			if err != nil {
+				return fmt.Errorf("time format is not %s", identifier)
+			}
+			return nil
+		default:
+			return fmt.Errorf("Should only have 1 or 2 parameters")
 		}
 	}, true)
 }
