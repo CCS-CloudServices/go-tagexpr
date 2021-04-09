@@ -961,3 +961,44 @@ func TestPathnameBUG(t *testing.T) {
 
 	assert.Equal(t, v, recv)
 }
+
+type TestStringAlias string
+
+func TestTypeAlias(t *testing.T) {
+	binding.MustRegTypeUnmarshal(reflect.TypeOf(TestStringAlias("")), func(v string, emptyAsZero bool) (reflect.Value, error) {
+		if v == "" && emptyAsZero {
+			return reflect.ValueOf(TestStringAlias("")), nil
+		}
+		return reflect.ValueOf(TestStringAlias(v)), nil
+	})
+
+	type TestStruct struct {
+		D TestStringAlias `query:"stringalias"`
+	}
+
+	req := newRequest("http://localhost:8080/?stringalias=123", nil, nil, nil)
+	recv := new(TestStruct)
+	binder := binding.New(nil)
+	binder.SetLooseZeroMode(true)
+	err := binder.BindAndValidate(recv, req, nil)
+	if assert.NoError(t, err) {
+		assert.Equal(t, TestStringAlias("123"), recv.D)
+	}
+}
+
+func TestArrayOfTypeAlias(t *testing.T) {
+	type TestStruct struct {
+		D []TestStringAlias `query:"stringalias"`
+	}
+
+	req := newRequest("http://localhost:8080/?stringalias=123&stringalias=234", nil, nil, nil)
+	recv := new(TestStruct)
+	binder := binding.New(nil)
+	binder.SetLooseZeroMode(true)
+	err := binder.BindAndValidate(recv, req, nil)
+	if assert.NoError(t, err) {
+		assert.Equal(t, 2, len(recv.D))
+		assert.Equal(t, TestStringAlias("123"), recv.D[0])
+		assert.Equal(t, TestStringAlias("234"), recv.D[1])
+	}
+}

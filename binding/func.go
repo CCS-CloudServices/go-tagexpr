@@ -17,6 +17,23 @@ type JSONUnmarshaler func(data []byte, v interface{}) error
 
 var (
 	jsonUnmarshalFunc func(data []byte, v interface{}) error
+
+	kindTypeMap = map[reflect.Kind]reflect.Type{
+		reflect.String:  reflect.TypeOf(""),
+		reflect.Bool:    reflect.TypeOf(false),
+		reflect.Float32: reflect.TypeOf(float32(0)),
+		reflect.Float64: reflect.TypeOf(float64(0)),
+		reflect.Int:     reflect.TypeOf(int(0)),
+		reflect.Int64:   reflect.TypeOf(int64(0)),
+		reflect.Int32:   reflect.TypeOf(int32(0)),
+		reflect.Int16:   reflect.TypeOf(int16(0)),
+		reflect.Int8:    reflect.TypeOf(int8(0)),
+		reflect.Uint:    reflect.TypeOf(uint(0)),
+		reflect.Uint64:  reflect.TypeOf(uint64(0)),
+		reflect.Uint32:  reflect.TypeOf(uint32(0)),
+		reflect.Uint16:  reflect.TypeOf(uint16(0)),
+		reflect.Uint8:   reflect.TypeOf(uint8(0)),
+	}
 )
 
 // ResetJSONUnmarshaler reset the JSON Unmarshal function.
@@ -39,17 +56,9 @@ func unsafeUnmarshalValue(v reflect.Value, s string, looseZeroMode bool) error {
 	return unmarshal(ameda.UnsafeStringToBytes(s), v.Addr().Interface())
 }
 
-func unsafeUnmarshalSlice(t reflect.Type, a []string, looseZeroMode bool) (reflect.Value, error) {
+func unmarshalSlice(fn func(string, bool) (reflect.Value, error), t reflect.Type, a []string, looseZeroMode bool) (
+	reflect.Value, error) {
 	var err error
-	fn := typeUnmarshalFuncs[t]
-	if fn == nil {
-		fn = func(s string, _ bool) (reflect.Value, error) {
-			v := reflect.New(t)
-			i := v.Interface()
-			err = unmarshal(ameda.UnsafeStringToBytes(s), i)
-			return v.Elem(), err
-		}
-	}
 	v := reflect.New(reflect.SliceOf(t)).Elem()
 	for _, s := range a {
 		var vv reflect.Value
@@ -91,7 +100,13 @@ func RegTypeUnmarshal(t reflect.Type, fn func(v string, emptyAsZero bool) (refle
 		reflect.Float32, reflect.Float64,
 		reflect.Int, reflect.Int64, reflect.Int32, reflect.Int16, reflect.Int8,
 		reflect.Uint, reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8:
-		return errors.New("registration type cannot be a basic type")
+		otherType, ok := kindTypeMap[t.Kind()]
+		if !ok {
+			return errors.New("basic type not supported in map")
+		}
+		if t == otherType {
+			return errors.New("registration type cannot be a basic type")
+		}
 	case reflect.Ptr:
 		return errors.New("registration type cannot be a pointer type")
 	}

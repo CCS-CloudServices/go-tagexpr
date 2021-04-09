@@ -339,6 +339,16 @@ func stringsToValue(t reflect.Type, a []string, emptyAsZero bool) (v reflect.Val
 		elemKind = t.Kind()
 		ptrDepth++
 	}
+
+	fn, found := typeUnmarshalFuncs[t]
+	if found {
+		v, err := unmarshalSlice(fn, t, a, emptyAsZero)
+		if err != nil {
+			return reflect.Value{}, false, nil
+		}
+		return goutil.ReferenceSlice(v, ptrDepth), false, nil
+	}
+
 	switch elemKind {
 	case reflect.String:
 		i = a
@@ -369,24 +379,17 @@ func stringsToValue(t reflect.Type, a []string, emptyAsZero bool) (v reflect.Val
 	case reflect.Uint8:
 		i, err = goutil.StringsToUint8s(a, emptyAsZero)
 	default:
-		v, err := unsafeUnmarshalSlice(t, a, emptyAsZero)
+		fn = func(s string, _ bool) (reflect.Value, error) {
+			v := reflect.New(t)
+			i := v.Interface()
+			err = unmarshal(ameda.UnsafeStringToBytes(s), i)
+			return v.Elem(), err
+		}
+		v, err := unmarshalSlice(fn, t, a, emptyAsZero)
 		if err == nil {
 			return goutil.ReferenceSlice(v, ptrDepth), false, nil
 		}
 		return reflect.Value{}, true, err
-		// fn := typeUnmarshalFuncs[t]
-		// if fn == nil {
-		// 	return reflect.Value{}, errMismatch
-		// }
-		// v := reflect.New(reflect.SliceOf(t)).Elem()
-		// for _, s := range a {
-		// 	vv, err := fn(s, emptyAsZero)
-		// 	if err != nil {
-		// 		return reflect.Value{}, errMismatch
-		// 	}
-		// 	v = reflect.Append(v, vv)
-		// }
-		// return goutil.ReferenceSlice(v, ptrDepth), nil
 	}
 	if err != nil {
 		return reflect.Value{}, false, errMismatch
