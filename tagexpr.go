@@ -24,8 +24,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/henrylee2cn/goutil"
-	"github.com/henrylee2cn/goutil/tpack"
+	"github.com/henrylee2cn/ameda"
 )
 
 // Internally unified data types
@@ -53,6 +52,7 @@ type structVM struct {
 	exprs                      map[string]*Expr
 	exprSelectorList           []string
 	ifaceTagExprGetters        []func(unsafe.Pointer, string, func(*TagExpr, error) error) error
+	err                        error
 }
 
 // fieldVM tag expression set of struct field
@@ -96,27 +96,35 @@ func (vm *VM) MustRun(structOrStructPtrOrReflectValue interface{}) *TagExpr {
 	return te
 }
 
-var unsupportNil = errors.New("unsupport data: nil")
+var (
+	unsupportNil        = errors.New("unsupport data: nil")
+	unsupportCannotAddr = errors.New("unsupport data: can not addr")
+)
 
-// Run returns the tag expression handler of the @structOrStructPtrOrReflectValue.
+// Run returns the tag expression handler of the @structPtrOrReflectValue.
 // NOTE:
 //  If the structure type has not been warmed up,
 //  it will be slower when it is first called.
 // Disable new -d=checkptr behaviour for Go 1.14
 //go:nocheckptr
-func (vm *VM) Run(structOrStructPtrOrReflectValue interface{}) (*TagExpr, error) {
-	var u tpack.U
-	v, isReflectValue := structOrStructPtrOrReflectValue.(reflect.Value)
-	if isReflectValue {
-		u = tpack.From(v)
-	} else {
-		u = tpack.Unpack(structOrStructPtrOrReflectValue)
+func (vm *VM) Run(structPtrOrReflectValue interface{}) (*TagExpr, error) {
+	var v reflect.Value
+	switch t := structPtrOrReflectValue.(type) {
+	case reflect.Value:
+		v = ameda.DereferenceValue(t)
+	default:
+		v = ameda.DereferenceValue(reflect.ValueOf(t))
 	}
+	if err := checkStructMapAddr(v); err != nil {
+		return nil, err
+	}
+
+	u := ameda.ValueFrom2(&v)
 	ptr := unsafe.Pointer(u.Pointer())
 	if ptr == nil {
 		return nil, unsupportNil
 	}
-	u = u.UnderlyingElem()
+
 	tid := u.RuntimeTypeID()
 	var err error
 	vm.rw.RLock()
@@ -126,17 +134,16 @@ func (vm *VM) Run(structOrStructPtrOrReflectValue interface{}) (*TagExpr, error)
 		vm.rw.Lock()
 		s, ok = vm.structJar[tid]
 		if !ok {
-			if isReflectValue {
-				s, err = vm.registerStructLocked(v.Type())
-			} else {
-				s, err = vm.registerStructLocked(reflect.TypeOf(structOrStructPtrOrReflectValue))
-			}
+			s, err = vm.registerStructLocked(v.Type())
 			if err != nil {
 				vm.rw.Unlock()
 				return nil, err
 			}
 		}
 		vm.rw.Unlock()
+	}
+	if s.err != nil {
+		return nil, s.err
 	}
 	return s.newTagExpr(ptr, ""), nil
 }
@@ -154,30 +161,44 @@ func (vm *VM) RunAny(v interface{}, fn func(*TagExpr, error) error) error {
 	return vm.subRunAll(false, "", vv, fn)
 }
 
+// check type: struct{F map[T1]T2}
+func checkStructMapAddr(v reflect.Value) error {
+	if !v.IsValid() || v.CanAddr() || v.NumField() != 1 || v.Field(0).Kind() != reflect.Map {
+		return nil
+	}
+	return unsupportCannotAddr
+}
+
 func (vm *VM) subRunAll(omitNil bool, tePath string, value reflect.Value, fn func(*TagExpr, error) error) error {
-	rv := goutil.DereferenceIfaceValue(value)
+	rv := ameda.DereferenceInterfaceValue(value)
 	if !rv.IsValid() {
 		return nil
 	}
-	rt := goutil.DereferenceType(rv.Type())
-	rv = goutil.DereferenceValue(rv)
+	rt := ameda.DereferenceType(rv.Type())
+	rv = ameda.DereferenceValue(rv)
 	switch rt.Kind() {
 	case reflect.Struct:
-		ptr := unsafe.Pointer(tpack.From(rv).Pointer())
+		if len(tePath) == 0 {
+			if err := checkStructMapAddr(rv); err != nil {
+				return err
+			}
+		}
+		u := ameda.ValueFrom2(&rv)
+		ptr := unsafe.Pointer(u.Pointer())
 		if ptr == nil {
 			if omitNil {
 				return nil
 			}
 			return fn(nil, unsupportNil)
 		}
-		return fn(vm.subRun(tePath, rt, tpack.RuntimeTypeID(rt), ptr))
+		return fn(vm.subRun(tePath, rt, u.RuntimeTypeID(), ptr))
 
 	case reflect.Slice, reflect.Array:
 		count := rv.Len()
 		if count == 0 {
 			return nil
 		}
-		switch goutil.DereferenceType(rv.Type().Elem()).Kind() {
+		switch ameda.DereferenceType(rv.Type().Elem()).Kind() {
 		case reflect.Struct, reflect.Interface, reflect.Slice, reflect.Array, reflect.Map:
 			for i := count - 1; i >= 0; i-- {
 				err := vm.subRunAll(omitNil, tePath+"["+strconv.Itoa(i)+"]", rv.Index(i), fn)
@@ -195,11 +216,11 @@ func (vm *VM) subRunAll(omitNil bool, tePath string, value reflect.Value, fn fun
 		}
 		var canKey, canValue bool
 		rt := rv.Type()
-		switch goutil.DereferenceType(rt.Key()).Kind() {
+		switch ameda.DereferenceType(rt.Key()).Kind() {
 		case reflect.Struct, reflect.Interface, reflect.Slice, reflect.Array, reflect.Map:
 			canKey = true
 		}
-		switch goutil.DereferenceType(rt.Elem()).Kind() {
+		switch ameda.DereferenceType(rt.Elem()).Kind() {
 		case reflect.Struct, reflect.Interface, reflect.Slice, reflect.Array, reflect.Map:
 			canValue = true
 		}
@@ -208,13 +229,13 @@ func (vm *VM) subRunAll(omitNil bool, tePath string, value reflect.Value, fn fun
 		}
 		for _, key := range rv.MapKeys() {
 			if canKey {
-				err := vm.subRunAll(omitNil, tePath+"{}", key, fn)
+				err := vm.subRunAll(omitNil, tePath+"{k}", key, fn)
 				if err != nil {
 					return err
 				}
 			}
 			if canValue {
-				err := vm.subRunAll(omitNil, tePath+"{K:"+key.String()+"}", rv.MapIndex(key), fn)
+				err := vm.subRunAll(omitNil, tePath+"{v for k="+key.String()+"}", rv.MapIndex(key), fn)
 				if err != nil {
 					return err
 				}
@@ -241,6 +262,9 @@ func (vm *VM) subRun(path string, t reflect.Type, tid uintptr, ptr unsafe.Pointe
 		}
 		vm.rw.Unlock()
 	}
+	if s.err != nil {
+		return nil, s.err
+	}
 	return s.newTagExpr(ptr, path), nil
 }
 
@@ -249,10 +273,10 @@ func (vm *VM) registerStructLocked(structType reflect.Type) (*structVM, error) {
 	if err != nil {
 		return nil, err
 	}
-	tid := tpack.RuntimeTypeID(structType)
+	tid := ameda.RuntimeTypeID(structType)
 	s, had := vm.structJar[tid]
 	if had {
-		return s, nil
+		return s, s.err
 	}
 	s = vm.newStructVM()
 	s.name = structType.String()
@@ -264,6 +288,7 @@ func (vm *VM) registerStructLocked(structType reflect.Type) (*structVM, error) {
 		structField = structType.Field(i)
 		field, err := s.newFieldVM(structField)
 		if err != nil {
+			s.err = err
 			return nil, err
 		}
 		switch field.elemKind {
@@ -273,6 +298,7 @@ func (vm *VM) registerStructLocked(structType reflect.Type) (*structVM, error) {
 			case reflect.Struct:
 				sub, err = vm.registerStructLocked(field.structField.Type)
 				if err != nil {
+					s.err = err
 					return nil, err
 				}
 				s.mergeSubStructVM(field, sub)
@@ -290,6 +316,7 @@ func (vm *VM) registerStructLocked(structType reflect.Type) (*structVM, error) {
 		case reflect.Array, reflect.Slice, reflect.Map:
 			err = vm.registerIndirectStructLocked(field)
 			if err != nil {
+				s.err = err
 				return nil, err
 			}
 		}
@@ -309,29 +336,67 @@ func (vm *VM) registerIndirectStructLocked(field *fieldVM) error {
 	}
 	for i, t := range a {
 		kind := t.Kind()
-		if kind != reflect.Struct {
-			if kind == reflect.Interface {
-				field.mapOrSliceIfaceKinds[i] = true
-				field.origin.fieldsWithIndirectStructVM = append(field.origin.fieldsWithIndirectStructVM, field)
+		switch kind {
+		case reflect.Interface:
+			field.mapOrSliceIfaceKinds[i] = true
+			field.origin.fieldsWithIndirectStructVM = appendDistinct(field.origin.fieldsWithIndirectStructVM, field)
+		case reflect.Slice, reflect.Array, reflect.Map:
+			tt := t.Elem()
+			checkMap := kind == reflect.Map
+		F2:
+			for {
+				switch tt.Kind() {
+				case reflect.Slice, reflect.Array, reflect.Map, reflect.Ptr:
+					tt = tt.Elem()
+				case reflect.Struct:
+					_, err := vm.registerStructLocked(tt)
+					if err != nil {
+						return err
+					}
+					field.mapOrSliceIfaceKinds[i] = true
+					field.origin.fieldsWithIndirectStructVM = appendDistinct(field.origin.fieldsWithIndirectStructVM, field)
+					break F2
+				default:
+					break F2
+				}
 			}
-			continue
-		}
-		s, err := vm.registerStructLocked(t)
-		if err != nil {
-			return err
-		}
-		if len(s.exprSelectorList) > 0 ||
-			len(s.ifaceTagExprGetters) > 0 ||
-			len(s.fieldsWithIndirectStructVM) > 0 {
-			if i == 0 {
-				field.mapOrSliceElemStructVM = s
-			} else {
-				field.mapKeyStructVM = s
+			if checkMap {
+				tt = t.Key()
+				checkMap = false
+				goto F2
 			}
-			field.origin.fieldsWithIndirectStructVM = append(field.origin.fieldsWithIndirectStructVM, field)
+		case reflect.Struct:
+			s, err := vm.registerStructLocked(t)
+			if err != nil {
+				return err
+			}
+			if len(s.exprSelectorList) > 0 ||
+				len(s.ifaceTagExprGetters) > 0 ||
+				len(s.fieldsWithIndirectStructVM) > 0 {
+				if i == 0 {
+					field.mapOrSliceElemStructVM = s
+				} else {
+					field.mapKeyStructVM = s
+				}
+				field.origin.fieldsWithIndirectStructVM = appendDistinct(field.origin.fieldsWithIndirectStructVM, field)
+			}
 		}
 	}
 	return nil
+}
+
+func appendDistinct(a []*fieldVM, i *fieldVM) []*fieldVM {
+	has := false
+	for _, e := range a {
+		if e == i {
+			has = true
+			break
+		}
+	}
+	if !has {
+		return append(a, i)
+	}
+	return a
 }
 
 func (vm *VM) newStructVM() *structVM {
@@ -697,13 +762,45 @@ func FakeBool(v interface{}) bool {
 	switch r := v.(type) {
 	case float64:
 		return r != 0
+	case float32:
+		return r != 0
+	case int:
+		return r != 0
+	case int8:
+		return r != 0
+	case int16:
+		return r != 0
+	case int32:
+		return r != 0
+	case int64:
+		return r != 0
+	case uint:
+		return r != 0
+	case uint8:
+		return r != 0
+	case uint16:
+		return r != 0
+	case uint32:
+		return r != 0
+	case uint64:
+		return r != 0
 	case string:
 		return r != ""
 	case bool:
 		return r
 	case nil, error:
 		return false
+	case []interface{}:
+		var bol = true
+		for _, v := range r {
+			bol = bol && FakeBool(v)
+		}
+		return bol
 	default:
+		vv := ameda.DereferenceValue(reflect.ValueOf(v))
+		if vv.IsValid() || vv.IsZero() {
+			return false
+		}
 		return true
 	}
 }
@@ -794,10 +891,10 @@ func (t *TagExpr) Range(fn func(*ExprHandler) error) error {
 
 			if f.elemKind == reflect.Map &&
 				(mapOrSliceElemStructVM != nil || mapKeyStructVM != nil || valueIface || keyIface) {
-				keyPath := f.fieldSelector + FieldSeparator + "{}"
+				keyPath := f.fieldSelector + "{k}"
 				for _, key := range v.MapKeys() {
 					if mapKeyStructVM != nil {
-						p := unsafe.Pointer(tpack.From(derefValue(key)).Pointer())
+						p := unsafe.Pointer(ameda.ValueFrom(derefValue(key)).Pointer())
 						if omitNil && p == nil {
 							continue
 						}
@@ -812,16 +909,16 @@ func (t *TagExpr) Range(fn func(*ExprHandler) error) error {
 						}
 					}
 					if mapOrSliceElemStructVM != nil {
-						p := unsafe.Pointer(tpack.From(derefValue(v.MapIndex(key))).Pointer())
+						p := unsafe.Pointer(ameda.ValueFrom(derefValue(v.MapIndex(key))).Pointer())
 						if omitNil && p == nil {
 							continue
 						}
-						err = mapOrSliceElemStructVM.newTagExpr(p, f.fieldSelector+"{"+key.String()+"}").Range(fn)
+						err = mapOrSliceElemStructVM.newTagExpr(p, f.fieldSelector+"{v for k="+key.String()+"}").Range(fn)
 						if err != nil {
 							return err
 						}
 					} else if valueIface {
-						err = t.subRange(omitNil, f.fieldSelector+"{"+key.String()+"}", v.MapIndex(key), fn)
+						err = t.subRange(omitNil, f.fieldSelector+"{v for k="+key.String()+"}", v.MapIndex(key), fn)
 						if err != nil {
 							return err
 						}
@@ -832,7 +929,7 @@ func (t *TagExpr) Range(fn func(*ExprHandler) error) error {
 				// slice or array
 				for i := v.Len() - 1; i >= 0; i-- {
 					if mapOrSliceElemStructVM != nil {
-						p := unsafe.Pointer(tpack.From(derefValue(v.Index(i))).Pointer())
+						p := unsafe.Pointer(ameda.ValueFrom(derefValue(v.Index(i))).Pointer())
 						if omitNil && p == nil {
 							continue
 						}
@@ -897,7 +994,7 @@ func (t *TagExpr) checkout(fs string) (*TagExpr, error) {
 		return nil, errFieldSelector
 	}
 	ptr := f.getElemPtr(t.ptr)
-	if f.tagOp == tagOmitNil && unsafe.Pointer(ptr) == nil {
+	if f.tagOp == tagOmitNil && ptr == nil {
 		t.sub[fs] = nil
 		return nil, errOmitNil
 	}

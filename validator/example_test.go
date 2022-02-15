@@ -8,23 +8,23 @@ import (
 
 func Example() {
 	type InfoRequest struct {
-		Name         string `vd:"($!='Alice'||(Age)$==18) && regexp('\\w')"`
-		Age          int    `vd:"$>0"`
-		Email        string `vd:"email($)"`
-		Phone1       string `vd:"phone($)"`
-		Phone2       string `vd:"phone($,'CN')"`
+		Name         string   `vd:"($!='Alice'||(Age)$==18) && regexp('\\w')"`
+		Age          int      `vd:"$>0"`
+		Email        string   `vd:"email($)"`
+		Phone1       string   `vd:"phone($)"`
+		OtherPhones  []string `vd:"range($, phone(#v,'CN'))"`
 		*InfoRequest `vd:"?"`
 		Info1        *InfoRequest `vd:"?"`
 		Info2        *InfoRequest `vd:"-"`
 	}
-	info := InfoRequest{
-		Name:   "Alice",
-		Age:    18,
-		Email:  "henrylee2cn@gmail.com",
-		Phone1: "+8618812345678",
-		Phone2: "18812345678",
+	info := &InfoRequest{
+		Name:        "Alice",
+		Age:         18,
+		Email:       "henrylee2cn@gmail.com",
+		Phone1:      "+8618812345678",
+		OtherPhones: []string{"18812345679", "18812345680"},
 	}
-	fmt.Println(vd.Validate(info) == nil)
+	fmt.Println(vd.Validate(info))
 
 	type A struct {
 		A    int `vd:"$<0||$>=100"`
@@ -33,7 +33,6 @@ func Example() {
 	info.Email = "xxx"
 	a := &A{A: 107, Info: info}
 	fmt.Println(vd.Validate(a))
-
 	type B struct {
 		B string `vd:"len($)>1 && regexp('^\\w*$')"`
 	}
@@ -74,24 +73,36 @@ func Example() {
 	fmt.Println(vd.Validate(f))
 
 	fmt.Println(vd.Validate(map[string]*F{"a": f}))
+	fmt.Println(vd.Validate(map[string]map[string]*F{"a": {"b": f}}))
+	fmt.Println(vd.Validate([]map[string]*F{{"a": f}}))
+	fmt.Println(vd.Validate(struct {
+		A []map[string]*F
+	}{A: []map[string]*F{{"x": f}}}))
 	fmt.Println(vd.Validate(map[*F]int{f: 1}))
 	fmt.Println(vd.Validate([][1]*F{{f}}))
 	fmt.Println(vd.Validate((*F)(nil)))
 	fmt.Println(vd.Validate(map[string]*F{}))
+	fmt.Println(vd.Validate(map[string]map[string]*F{}))
+	fmt.Println(vd.Validate([]map[string]*F{}))
 	fmt.Println(vd.Validate([]*F{}))
 
 	// Output:
-	// true
+	// <nil>
 	// email format is incorrect
 	// true
 	// C must be false when S.A>0
 	// invalid d: [x y]
 	// invalid parameter: e
 	// {"succ":false, "error":"validation failed: f.g"}
-	// {"succ":false, "error":"validation failed: {K:a}.f.g"}
-	// {"succ":false, "error":"validation failed: {}.f.g"}
+	// {"succ":false, "error":"validation failed: {v for k=a}.f.g"}
+	// {"succ":false, "error":"validation failed: {v for k=a}{v for k=b}.f.g"}
+	// {"succ":false, "error":"validation failed: [0]{v for k=a}.f.g"}
+	// {"succ":false, "error":"validation failed: A[0]{v for k=x}.f.g"}
+	// {"succ":false, "error":"validation failed: {k}.f.g"}
 	// {"succ":false, "error":"validation failed: [0][0].f.g"}
 	// unsupport data: nil
+	// <nil>
+	// <nil>
 	// <nil>
 	// <nil>
 }

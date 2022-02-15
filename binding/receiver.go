@@ -51,7 +51,7 @@ const (
 )
 
 type receiver struct {
-	hasPath, hasQuery, hasBody, hasCookie, hasVd bool
+	hasPath, hasQuery, hasBody, hasCookie, hasDefaultVal, hasVd bool
 
 	params []*paramInfo
 
@@ -68,6 +68,8 @@ func (r *receiver) assginIn(i in, v bool) {
 		r.hasBody = r.hasBody || v
 	case cookie:
 		r.hasCookie = r.hasCookie || v
+	case default_val:
+		r.hasDefaultVal = r.hasDefaultVal || v
 	}
 }
 

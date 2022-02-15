@@ -2,6 +2,7 @@ package binding
 
 import (
 	jsonpkg "encoding/json"
+	"mime/multipart"
 	"net/http"
 	"reflect"
 	"strings"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/henrylee2cn/ameda"
 	"github.com/henrylee2cn/goutil"
-	"github.com/henrylee2cn/goutil/tpack"
 
 	"github.com/bytedance/go-tagexpr/v2"
 	"github.com/bytedance/go-tagexpr/v2/validator"
@@ -176,6 +176,13 @@ func (b *Binding) bindStruct(structPointer interface{}, structValue reflect.Valu
 	if err != nil {
 		return
 	}
+	var fileHeaders map[string][]*multipart.FileHeader
+	if _req, ok := req.(requestWithFileHeader); ok {
+		fileHeaders, err = _req.GetFileHeaders()
+		if err != nil {
+			return
+		}
+	}
 	queryValues := recv.getQuery(req)
 	cookies := recv.getCookies(req)
 
@@ -183,25 +190,25 @@ func (b *Binding) bindStruct(structPointer interface{}, structValue reflect.Valu
 		for i, info := range param.tagInfos {
 			var found bool
 			switch info.paramIn {
+			case raw_body:
+				err = param.bindRawBody(info, expr, bodyBytes)
+				found = err == nil
 			case path:
 				found, err = param.bindPath(info, expr, pathParams)
 			case query:
 				found, err = param.bindQuery(info, expr, queryValues)
 			case cookie:
-				err = param.bindCookie(info, expr, cookies)
-				found = err == nil
+				found, err = param.bindCookie(info, expr, cookies)
 			case header:
 				found, err = param.bindHeader(info, expr, req.GetHeader())
 			case form, json, protobuf:
 				if info.paramIn == in(bodyCodec) {
-					found, err = param.bindOrRequireBody(info, expr, bodyCodec, bodyString, postForm)
+					found, err = param.bindOrRequireBody(info, expr, bodyCodec, bodyString, postForm, fileHeaders,
+						recv.hasDefaultVal)
 				} else if info.required {
 					found = false
 					err = info.requiredError
 				}
-			case raw_body:
-				err = param.bindRawBody(info, expr, bodyBytes)
-				found = err == nil
 			case default_val:
 				found, err = param.bindDefaultVal(expr, param.defaultVal)
 			}
@@ -219,7 +226,7 @@ func (b *Binding) bindStruct(structPointer interface{}, structValue reflect.Valu
 func (b *Binding) receiverValueOf(receiver interface{}) (reflect.Value, error) {
 	v := reflect.ValueOf(receiver)
 	if v.Kind() == reflect.Ptr {
-		v = goutil.DereferencePtrValue(v)
+		v = ameda.DereferencePtrValue(v)
 		if v.IsValid() && v.CanAddr() {
 			return v, nil
 		}
@@ -228,15 +235,15 @@ func (b *Binding) receiverValueOf(receiver interface{}) (reflect.Value, error) {
 }
 
 func (b *Binding) getOrPrepareReceiver(value reflect.Value) (*receiver, error) {
-	runtimeTypeID := tpack.From(value).RuntimeTypeID()
+	runtimeTypeID := ameda.ValueFrom(value).RuntimeTypeID()
 	b.lock.RLock()
 	recv, ok := b.recvs[runtimeTypeID]
 	b.lock.RUnlock()
 	if ok {
 		return recv, nil
 	}
-
-	expr, err := b.vd.VM().Run(reflect.New(value.Type()).Elem())
+	t := value.Type()
+	expr, err := b.vd.VM().Run(reflect.New(t).Elem())
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +313,8 @@ func (b *Binding) getOrPrepareReceiver(value reflect.Value) (*receiver, error) {
 			}
 		}
 		fs := string(fh.FieldSelector())
-		if len(p.tagInfos) == 0 {
+		switch len(p.tagInfos) {
+		case 0:
 			var canDefault = true
 			for s := range fieldsWithValidTag {
 				if strings.HasPrefix(fs, s) {
@@ -333,7 +341,25 @@ func (b *Binding) getOrPrepareReceiver(value reflect.Value) (*receiver, error) {
 					recv.assginIn(i, true)
 				}
 			}
-		} else {
+		case 1:
+			if p.tagInfos[0].paramIn == default_val {
+				last := p.tagInfos[0]
+				p.tagInfos = make([]*tagInfo, 0, len(sortedDefaultIn)+1)
+				for _, i := range sortedDefaultIn {
+					if p.omitIns[i] {
+						recv.assginIn(i, false)
+						continue
+					}
+					p.tagInfos = append(p.tagInfos, &tagInfo{
+						paramIn:   i,
+						paramName: p.structField.Name,
+					})
+					recv.assginIn(i, true)
+				}
+				p.tagInfos = append(p.tagInfos, last)
+			}
+			fallthrough
+		default:
 			fieldsWithValidTag[fs+tagexpr.FieldSeparator] = true
 		}
 		if !recv.hasVd {
@@ -345,7 +371,9 @@ func (b *Binding) getOrPrepareReceiver(value reflect.Value) (*receiver, error) {
 	if errMsg != "" {
 		return nil, b.bindErrFactory(errExprSelector.String(), errMsg)
 	}
-
+	if !recv.hasVd {
+		recv.hasVd, _ = b.findVdTag(ameda.DereferenceType(t), false, 20, map[reflect.Type]bool{})
+	}
 	recv.initParams()
 
 	b.lock.Lock()
@@ -353,4 +381,35 @@ func (b *Binding) getOrPrepareReceiver(value reflect.Value) (*receiver, error) {
 	b.lock.Unlock()
 
 	return recv, nil
+}
+
+func (b *Binding) findVdTag(t reflect.Type, inMapOrSlice bool, depth int, exist map[reflect.Type]bool) (hasVd bool, err error) {
+	if depth <= 0 || exist[t] {
+		return
+	}
+	depth--
+	switch t.Kind() {
+	case reflect.Struct:
+		exist[t] = true
+		for i := t.NumField() - 1; i >= 0; i-- {
+			field := t.Field(i)
+			if inMapOrSlice {
+				tagKVs := b.config.parse(field)
+				for _, tagKV := range tagKVs {
+					if tagKV.name == b.config.Validator {
+						return true, nil
+					}
+				}
+			}
+			hasVd, _ = b.findVdTag(ameda.DereferenceType(field.Type), inMapOrSlice, depth, exist)
+			if hasVd {
+				return true, nil
+			}
+		}
+		return false, nil
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return b.findVdTag(ameda.DereferenceType(t.Elem()), true, depth, exist)
+	default:
+		return false, nil
+	}
 }

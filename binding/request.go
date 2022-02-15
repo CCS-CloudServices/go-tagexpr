@@ -3,9 +3,15 @@ package binding
 import (
 	"bytes"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 )
+
+type requestWithFileHeader interface {
+	Request
+	GetFileHeaders() (map[string][]*multipart.FileHeader, error)
+}
 
 type Request interface {
 	GetMethod() string
@@ -85,4 +91,11 @@ func (r *httpRequest) GetPostForm() (url.Values, error) {
 
 func (r *httpRequest) GetForm() (url.Values, error) {
 	return r.Form, nil
+}
+
+func (r *httpRequest) GetFileHeaders() (map[string][]*multipart.FileHeader, error) {
+	if r.MultipartForm == nil {
+		return nil, nil
+	}
+	return r.MultipartForm.File, nil
 }

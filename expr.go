@@ -15,6 +15,7 @@
 package tagexpr
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -32,7 +33,7 @@ func parseExpr(expr string) (*Expr, error) {
 	s := expr
 	_, err := p.parseExprNode(&s, e)
 	if err != nil {
-		return nil, fmt.Errorf("%q (syntax error): %s", expr, err.Error())
+		return nil, err
 	}
 	sortPriority(e.RightOperand())
 	err = p.checkSyntax()
@@ -44,7 +45,7 @@ func parseExpr(expr string) (*Expr, error) {
 
 // run calculates the value of expression.
 func (p *Expr) run(field string, tagExpr *TagExpr) interface{} {
-	return p.expr.Run(field, tagExpr)
+	return p.expr.Run(context.Background(), field, tagExpr)
 }
 
 func (p *Expr) parseOperand(expr *string) (e ExprNode) {
@@ -130,21 +131,23 @@ func (p *Expr) parseExprNode(expr *string, e ExprNode) (ExprNode, error) {
 	}
 	operand := p.readSelectorExprNode(expr)
 	if operand == nil {
-		var subExprNode *string
-		operand, subExprNode = readGroupExprNode(expr)
-		if operand != nil {
-			_, err := p.parseExprNode(subExprNode, operand)
-			if err != nil {
-				return nil, err
+		operand = p.readRangeKvExprNode(expr)
+		if operand == nil {
+			var subExprNode *string
+			operand, subExprNode = readGroupExprNode(expr)
+			if operand != nil {
+				_, err := p.parseExprNode(subExprNode, operand)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				operand = p.parseOperand(expr)
 			}
-		} else {
-			operand = p.parseOperand(expr)
 		}
 	}
 	if operand == nil {
-		return nil, fmt.Errorf("parsing pos: %q", *expr)
+		return nil, fmt.Errorf("syntax error: %q", *expr)
 	}
-
 	trimLeftSpace(expr)
 	operator := p.parseOperator(expr)
 	if operator == nil {
@@ -252,7 +255,7 @@ type ExprNode interface {
 	RightOperand() ExprNode
 	SetLeftOperand(ExprNode)
 	SetRightOperand(ExprNode)
-	Run(string, *TagExpr) interface{}
+	Run(context.Context, string, *TagExpr) interface{}
 }
 
 var _ ExprNode = new(exprBackground)
@@ -287,4 +290,4 @@ func (eb *exprBackground) SetRightOperand(right ExprNode) {
 	eb.rightOperand = right
 }
 
-func (*exprBackground) Run(string, *TagExpr) interface{} { return nil }
+func (*exprBackground) Run(context.Context, string, *TagExpr) interface{} { return nil }

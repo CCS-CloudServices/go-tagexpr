@@ -2,13 +2,16 @@ package binding
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	jsonpkg "encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 
-	"github.com/gogo/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 func getBodyCodec(req Request) codec {
@@ -60,12 +63,30 @@ func GetBody(r *http.Request) (*Body, error) {
 		body.Reset()
 		return body, nil
 	default:
-		var buf bytes.Buffer
-		_, err := io.Copy(&buf, r.Body)
-		r.Body.Close()
+		var err error
+		var closeBody = r.Body.Close
+		switch r.Header.Get("Content-Encoding") {
+		case "gzip":
+			var gzipReader *gzip.Reader
+			gzipReader, err = gzip.NewReader(r.Body)
+			if err == nil {
+				r.Body = gzipReader
+			}
+		case "deflate":
+			r.Body = flate.NewReader(r.Body)
+		case "zlib":
+			var readCloser io.ReadCloser
+			readCloser, err = zlib.NewReader(r.Body)
+			if err == nil {
+				r.Body = readCloser
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r.Body)
+		_ = closeBody()
 		_body := &Body{
 			Buffer:    &buf,
 			bodyBytes: buf.Bytes(),
